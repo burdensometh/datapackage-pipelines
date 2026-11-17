@@ -54,8 +54,21 @@ class PipelineStatus(object):
     def save(self):
         self.__save()
 
-    def dirty(self):
-        return self.num_executions == 0 or self.cache_hash != self.last_execution.cache_hash
+    def dirty(self, cache_hash=None):
+        """Whether the pipeline needs to run.
+
+        ``cache_hash`` - when given - is a hash freshly calculated from the
+        current code *and* the current dependency data versions; it is
+        compared against what the last execution was calculated from.
+        """
+        if self.num_executions == 0:
+            return True
+        if cache_hash is None:
+            cache_hash = self.cache_hash
+        last_execution = self.last_execution
+        if last_execution is None:
+            return True
+        return cache_hash != last_execution.cache_hash
 
     @property
     def executions(self):
@@ -109,7 +122,8 @@ class PipelineStatus(object):
                     return ex
         return None
 
-    def queue_execution(self, execution_id, trigger):
+    def queue_execution(self, execution_id, trigger, dependency_bindings=None,
+                        pipeline_path=None):
         last_exec = self.get_last_execution()
         if last_exec is not None and last_exec.finish_time is None:
             if last_exec.is_stale():
@@ -123,7 +137,10 @@ class PipelineStatus(object):
         #         break
         execution = PipelineExecution(self.backend,
                                       self.pipeline_id, self.pipeline_details, self.cache_hash,
-                                      trigger, execution_id, save=False)
+                                      trigger, execution_id,
+                                      dependency_bindings=dependency_bindings,
+                                      pipeline_path=pipeline_path,
+                                      save=False)
         assert execution.queue_execution(trigger)
         self.executions.insert(0, execution)
         while len(self.executions) > 10:
@@ -143,16 +160,18 @@ class PipelineStatus(object):
             return False
         return True
 
-    def start_execution(self, execution_id):
+    def start_execution(self, execution_id, dependency_bindings=None):
         if not self.validate_execution_id(execution_id):
             return False
         self.update_hooks('start')
-        return self.executions[0].start_execution()
+        return self.executions[0].start_execution(dependency_bindings)
 
-    def finish_execution(self, execution_id, success, stats, error_log):
+    def finish_execution(self, execution_id, success, stats, error_log,
+                         output=None):
         if self.validate_execution_id(execution_id):
             self.update_hooks('finish', success=success, errors=error_log, stats=stats)
-            return self.executions[0].finish_execution(success, stats, error_log)
+            return self.executions[0].finish_execution(success, stats, error_log,
+                                                       output=output)
         return False
 
     def update_execution(self, execution_id, log, hooks=False):

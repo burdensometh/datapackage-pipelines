@@ -24,6 +24,66 @@ ProgressReport = namedtuple('ProgressReport',
 
 MAGIC = 'INFO    :(sink): '+SINK_MAGIC
 
+DEPENDENCY_BINDINGS_ENV = 'DPP_DEPENDENCY_BINDINGS'
+
+
+def replay_execution(execution_id, root_dir='.'):
+    """Re-run a previously recorded execution against its bound data versions.
+
+    The execution's ``dependency_bindings`` are used as-is: dependencies are
+    read from the exact snapshots recorded when they were selected, never
+    from whatever content currently lives in their latest output path.  If a
+    bound version is missing the run fails with DependencyVersionMissing.
+    """
+    from ..specs.resolver import resolve_executor
+    from ..specs.schemas.validator import validate_pipeline
+    from ..specs.errors import SpecError
+    from ..status.pipeline_execution import PipelineExecution
+
+    backend = status_mgr(root_dir).backend
+    data = backend.get_status('PipelineExecution:' + execution_id)
+    if data is None:
+        raise KeyError('Unknown execution id %s' % execution_id)
+
+    execution = PipelineExecution.from_execution_id(backend, execution_id)
+
+    spec = PipelineSpec(pipeline_id=execution.pipeline_id,
+                        pipeline_details=execution.pipeline_details,
+                        path=execution.pipeline_path or root_dir,
+                        dependency_bindings=execution.dependency_bindings)
+    if execution.cache_hash:
+        spec.cache_hash = execution.cache_hash
+    if spec.pipeline_details is not None and \
+            validate_pipeline(spec.pipeline_details, spec.validation_errors):
+        for step in spec.pipeline_details.get('pipeline', []):
+            if 'executor' not in step:
+                step['executor'] = resolve_executor(step,
+                                                    os.path.abspath(spec.path),
+                                                    spec.validation_errors)
+    else:
+        spec.validation_errors.append(
+            SpecError('Invalid Spec', 'Cannot replay this execution'))
+
+    if len(spec.validation_errors) > 0:
+        return ExecutionResult(spec.pipeline_id, False, {},
+                               ['init'] + list(map(str, spec.validation_errors)))
+
+    status_manager = status_mgr(root_dir)
+    ps = status_manager.get(spec.pipeline_id)
+    ps.init(spec.pipeline_details,
+            spec.source_details,
+            spec.validation_errors,
+            spec.cache_hash)
+    eid = gen_execution_id()
+    if not ps.queue_execution(eid, 'replay', execution.dependency_bindings,
+                              pipeline_path=spec.path):
+        return ExecutionResult(spec.pipeline_id, False, None,
+                               ['Already Running'])
+    success, stats, errors = \
+        execute_pipeline(spec, eid, 'replay',
+                         dependency_bindings=execution.dependency_bindings)
+    return ExecutionResult(spec.pipeline_id, success, stats, errors)
+
 
 def remote_execute_pipeline(spec, root_dir, use_cache, verbose, progress_report_queue):
     args = ['dpp',
@@ -31,10 +91,15 @@ def remote_execute_pipeline(spec, root_dir, use_cache, verbose, progress_report_
             '--slave',
             '--use-cache' if use_cache else '--no-use-cache',
             spec.pipeline_id]
+    env = os.environ.copy()
+    if getattr(spec, 'dependency_bindings', None):
+        # Fix the exact dependency data versions for this execution; the
+        # subprocess must not re-select them.
+        env[DEPENDENCY_BINDINGS_ENV] = json.dumps(spec.dependency_bindings)
     popen = subprocess.Popen(args, encoding='utf8',
                              stderr=subprocess.PIPE,
                              stdout=subprocess.DEVNULL,
-                             env=os.environ.copy(),
+                             env=env,
                              cwd=root_dir)
     progress = 0
     lines = []
@@ -111,6 +176,18 @@ def match_pipeline_id(arg, pipeline_id):
         return pipeline_id == arg
 
 
+def spec_is_dirty(spec, ps):
+    """Dirtiness of a spec as calculated during this scan.
+
+    Unlike ``PipelineStatus.dirty()`` - which compares the status saved by
+    the last scan - this uses the hash calculated from the current code
+    *and the current dependency data versions*.  That is what makes a
+    pipeline dirty when a dependency republished new data without changing
+    its code.
+    """
+    return ps.dirty(spec.cache_hash)
+
+
 def specs_to_execute(argument, root_dir, status_manager, ignore_missing_deps, dirty, results):
 
     pending = set()
@@ -124,7 +201,7 @@ def specs_to_execute(argument, root_dir, status_manager, ignore_missing_deps, di
             # If only dirty was requested
             if dirty:
                 ps = status_manager.get(spec.pipeline_id)
-                if not ps.dirty():
+                if not spec_is_dirty(spec, ps):
                     continue
 
             pending.add(spec.pipeline_id)
@@ -227,16 +304,29 @@ def run_pipelines(pipeline_id_pattern,
                     # Set environment variables for the pipeline
                     for key, value in spec.environment.items():
                         os.environ[key] = str(value)
+                    dependency_bindings = spec.dependency_bindings
+                    bindings_env = os.environ.get(DEPENDENCY_BINDINGS_ENV)
+                    if bindings_env:
+                        # The parent process selected the exact data versions
+                        # for this execution - never re-select them here.
+                        dependency_bindings = json.loads(bindings_env)
+                    # Step cache hashes must be derived from the bindings that
+                    # will actually be used by this execution.
+                    from ..specs.hashers.hash_calculator import \
+                        rebase_with_bindings
+                    rebase_with_bindings(spec, dependency_bindings)
                     ps = status_manager.get(spec.pipeline_id)
                     ps.init(spec.pipeline_details,
                             spec.source_details,
                             spec.validation_errors,
                             spec.cache_hash)
                     eid = gen_execution_id()
-                    if ps.queue_execution(eid, 'manual'):
+                    if ps.queue_execution(eid, 'manual', dependency_bindings,
+                                          pipeline_path=spec.path):
                         success, stats, errors = \
                             execute_pipeline(spec, eid,
-                                             use_cache=use_cache)
+                                             use_cache=use_cache,
+                                             dependency_bindings=dependency_bindings)
                         results.append(ExecutionResult(
                             spec.pipeline_id,
                             success,

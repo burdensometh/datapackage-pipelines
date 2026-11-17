@@ -211,6 +211,8 @@ You can declare that a pipeline is dependent on another pipeline or datapackage.
 - For pipeline dependencies, the hash of that pipeline is used in the calculation
 - For datapackage dependencies, the `hash` property in the datapackage is used in the calculation
 
+In addition, a pipeline dependency is bound to the **actual data version** that the selected successful execution of the dependency published (the `hash` of its output datapackage). This means that when the same dependency pipeline publishes new data - even if its code and parameters did not change at all - the hash of every dependent is different and the dependent is considered dirty, so its data steps are recalculated against the new data.
+
 If the dependency is missing, then the pipeline is marked as 'unable to be executed'.
 
 Declaring dependencies is done by a `dependencies` property to a pipeline definition in the `pipeline-spec.yaml` file.
@@ -230,6 +232,14 @@ cat-vs-dog-populations:
       datapackage: http://pets.net/data/dogs-per-region
   ...
 ```
+
+#### Dependency version bindings
+
+When an execution starts, the exact data version of each pipeline dependency is fixed for the whole run:
+
+- `dependency://<pipeline-id>` reads are resolved to an immutable snapshot of that version (under `.dpp-dependencies/`), not to the dependency's live output path. If the dependency republishes while the run is in progress, the running execution still sees the version it selected.
+- The selected versions are stored with the execution record (`dependency_bindings` on each `PipelineExecution`), together with the dependency's execution id, output datapackage URL, content version and snapshot location.
+- Replaying a recorded execution (`dpp replay <execution-id>`, or `replay_execution(execution_id)` from Python) re-runs it against those recorded versions. A replay never silently reads newer content from the latest output path: if the recorded snapshot is gone and the original location no longer holds that exact version, the replay fails with a `DependencyVersionMissing` error.
 
 ### Validating
 

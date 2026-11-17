@@ -11,7 +11,7 @@ from .manager.logging_config import logging
 
 from .specs import pipelines, PipelineSpec #noqa
 from .status import status_mgr
-from .manager import run_pipelines
+from .manager import run_pipelines, replay_execution
 
 
 @click.group(invoke_without_command=True)
@@ -23,7 +23,7 @@ def cli(ctx):
             ps = status_mgr().get(spec.pipeline_id)
             click.echo('- {} {}{}'
                        .format(spec.pipeline_id,
-                               '(*)' if ps.dirty() else '',
+                               '(*)' if ps.dirty(spec.cache_hash) else '',
                                '(E)' if len(spec.validation_errors) > 0 else ''))
             for error in spec.validation_errors:
                 click.echo('\t{}: {}'.format(error.short_msg,
@@ -115,6 +115,23 @@ def run(pipeline_id, verbose, use_cache, dirty, force, concurrency, slave):
         exitcode = 1
 
     exit(exitcode)
+
+
+@cli.command()
+@click.argument('execution_id')
+@click.option('--verbose', default=False, is_flag=True)
+def replay(execution_id, verbose):
+    """Replay a recorded execution against the dependency data versions it
+    was bound to (never the dependencies' current latest output)."""
+    result = replay_execution(execution_id)
+    stats = user_facing_stats(result.stats)
+    logging.info('%s: %s %s%s',
+                 'SUCCESS' if result.success else 'FAILURE',
+                 result.pipeline_id,
+                 repr(stats) if stats is not None else '',
+                 ('\nERROR: ' + '\n'.join(result.errors))
+                 if result.errors and verbose else '')
+    exit(0 if result.success else 1)
 
 
 @cli.command()

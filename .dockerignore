@@ -3,6 +3,7 @@
 .cache/
 .dpp.db
 .dppdb
+.dpp-dependencies/
 .github/
 .idea/
 build/

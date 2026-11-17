@@ -12,9 +12,33 @@ class DependencyMissingException(Exception):
         self.missing = missing
 
 
-def resolve_dependencies(spec: PipelineSpec, all_pipeline_ids, status_mgr):
+def compose_dependency_hash(parts, dependency_bindings):
+    """Build the dependency portion of a pipeline's cache hash.
 
+    ``parts`` is the list recorded when dependencies were resolved.  Pipeline
+    dependency parts additionally fold in the exact data version selected for
+    the run, so republished data changes the hash even when the dependency's
+    code did not change.
+    """
     cache_hash = ''
+    for part in parts:
+        kind = part[0]
+        if kind == 'pipeline':
+            _, pipeline_id, pipeline_hash = part
+            cache_hash += pipeline_hash
+            binding = (dependency_bindings or {}).get(pipeline_id)
+            if binding is not None:
+                cache_hash += ':' + str(binding.get('version', ''))
+        else:
+            cache_hash += part[1]
+    return cache_hash
+
+
+def resolve_dependencies(spec: PipelineSpec, all_pipeline_ids, status_mgr,
+                         dependency_bindings=None):
+
+    dependency_bindings = dependency_bindings or {}
+    parts = []
     dependencies = spec.pipeline_details.get('dependencies', ())
     for dependency in dependencies:
         if 'pipeline' in dependency:
@@ -50,7 +74,7 @@ def resolve_dependencies(spec: PipelineSpec, all_pipeline_ids, status_mgr):
 
             pipeline_hash = all_pipeline_ids.get(pipeline_id).cache_hash
             assert pipeline_hash is not None
-            cache_hash += pipeline_hash
+            parts.append(('pipeline', pipeline_id, pipeline_hash))
 
             spec.dependencies.append(pipeline_id)
 
@@ -59,7 +83,7 @@ def resolve_dependencies(spec: PipelineSpec, all_pipeline_ids, status_mgr):
             try:
                 dp = datapackage.DataPackage(dp_id)
                 if 'hash' in dp.descriptor:
-                    cache_hash += dp.descriptor['hash']
+                    parts.append(('literal', dp.descriptor['hash']))
                 else:
                     spec.validation_errors.append(
                         SpecError('Missing dependency',
@@ -76,4 +100,5 @@ def resolve_dependencies(spec: PipelineSpec, all_pipeline_ids, status_mgr):
                 SpecError('Missing dependency',
                           'Unknown dependency provided (%r)' % dependency))
 
-    return cache_hash
+    spec.dependency_hash_parts = parts
+    return compose_dependency_hash(parts, dependency_bindings)

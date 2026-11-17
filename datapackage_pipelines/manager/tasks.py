@@ -6,8 +6,14 @@ from concurrent.futures import CancelledError
 from json.decoder import JSONDecodeError
 
 from ..specs.specs import resolve_executor
+from ..specs.dependency_bindings import (
+    DependencyVersionMissing,
+    live_bindings,
+    materialize_bindings,
+    output_from_stats,
+    prune_snapshots,
+)
 from ..status import status_mgr
-from ..utilities.stat_utils import STATS_DPP_KEY, STATS_OUT_DP_URL_KEY
 from ..utilities.extended_json import json
 
 from .runners import runner_config
@@ -211,12 +217,13 @@ async def async_execute_pipeline(pipeline_id,
                                  execution_id,
                                  use_cache,
                                  dependencies,
-                                 debug):
+                                 debug,
+                                 dependency_bindings=None):
 
     if debug:
         logging.info("%s Async task starting", execution_id[:8])
     ps = status_mgr().get(pipeline_id)
-    if not ps.start_execution(execution_id):
+    if not ps.start_execution(execution_id, dependency_bindings):
         logging.info("%s START EXECUTION FAILED %s, BAILING OUT", execution_id[:8], pipeline_id)
         return False, {}, []
 
@@ -287,7 +294,23 @@ async def async_execute_pipeline(pipeline_id,
         stats = None
 
     ps.update_execution(execution_id, execution_log, hooks=True)
-    ps.finish_execution(execution_id, success, stats, error_log)
+
+    output = None
+    if success:
+        # Record the identity of the data this execution published, and
+        # freeze it so dependents can bind to this exact version.
+        output = output_from_stats(stats, pipeline_cwd, pipeline_id,
+                                   snapshot=True)
+
+    ps.finish_execution(execution_id, success, stats, error_log, output=output)
+
+    if output is not None:
+        # Keep the store proportional to the retained execution history.
+        retained_versions = set()
+        for execution in ps.executions:
+            if execution.output:
+                retained_versions.add(execution.output.get('version'))
+        prune_snapshots(pipeline_id, retained_versions, status_mgr())
 
     logging.info("%s DONE %s %s %r", execution_id[:8], 'V' if success else 'X', pipeline_id, stats)
 
@@ -297,7 +320,8 @@ async def async_execute_pipeline(pipeline_id,
 def execute_pipeline(spec,
                      execution_id,
                      trigger='manual',
-                     use_cache=True):
+                     use_cache=True,
+                     dependency_bindings=None):
 
     debug = trigger == 'manual' or os.environ.get('DPP_DEBUG')
     logging.info("%s RUNNING %s", execution_id[:8], spec.pipeline_id)
@@ -306,15 +330,49 @@ def execute_pipeline(spec,
 
     if debug:
         logging.info("%s Collecting dependencies", execution_id[:8])
+
+    # Pin the exact data version of each pipeline dependency for this run.
+    # Bindings selected when the run was planned win; otherwise select the
+    # dependency's latest successful output now.
+    bindings = dependency_bindings or \
+        getattr(spec, 'dependency_bindings', None) or \
+        live_bindings(spec.pipeline_details.get('dependencies', ()),
+                      status_mgr(),
+                      spec.path)
+    bindings = dict(bindings)
+    try:
+        bindings, dependency_urls = materialize_bindings(bindings)
+    except DependencyVersionMissing as e:
+        logging.error("%s DEPENDENCY DATA VERSION MISSING %s",
+                      execution_id[:8], e)
+        # Do not leave the queued execution dangling.
+        ps = status_mgr().get(spec.pipeline_id)
+        ps.start_execution(execution_id)
+        ps.finish_execution(execution_id, False, {}, [str(e)])
+        return False, {}, [str(e)]
+
+    # The step cache hashes were derived from the bindings selected at scan
+    # time.  If this run is pinned to a different set (queued/replayed), the
+    # hashes must be rebased - otherwise the run could reuse a cache computed
+    # against another data version.
+    from ..specs.hashers.hash_calculator import rebase_with_bindings
+    rebase_with_bindings(spec, bindings)
+
+    # Status is (re-)initialised here so the status record always reflects
+    # the hash the execution is actually calculated from (also when the spec
+    # came from a queueing process rather than this scan).
+    ps = status_mgr().get(spec.pipeline_id)
+    ps.init(spec.pipeline_details,
+            spec.source_details,
+            spec.validation_errors,
+            spec.cache_hash)
+
     dependencies = {}
     for dep in spec.pipeline_details.get('dependencies', []):
         if 'pipeline' in dep:
             dep_pipeline_id = dep['pipeline']
-            pipeline_execution = status_mgr().get(dep_pipeline_id).get_last_successful_execution()
-            if pipeline_execution is not None:
-                result_dp = pipeline_execution.stats.get(STATS_DPP_KEY, {}).get(STATS_OUT_DP_URL_KEY)
-                if result_dp is not None:
-                    dependencies[dep_pipeline_id] = result_dp
+            if dep_pipeline_id in dependency_urls:
+                dependencies[dep_pipeline_id] = dependency_urls[dep_pipeline_id]
 
     if debug:
         logging.info("%s Running async task", execution_id[:8])
@@ -327,7 +385,8 @@ def execute_pipeline(spec,
                                                      execution_id,
                                                      use_cache,
                                                      dependencies,
-                                                     debug))
+                                                     debug,
+                                                     bindings))
     try:
         if debug:
             logging.info("%s Waiting for completion", execution_id[:8])

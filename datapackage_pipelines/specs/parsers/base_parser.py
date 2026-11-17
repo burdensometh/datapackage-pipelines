@@ -8,7 +8,8 @@ class PipelineSpec(object):
                  dependencies=None,
                  cache_hash='',
                  schedule=None,
-                 environment=None):
+                 environment=None,
+                 dependency_bindings=None):
         self.path = path
         self.pipeline_id = pipeline_id
         self.pipeline_details = pipeline_details
@@ -18,6 +19,10 @@ class PipelineSpec(object):
         self.cache_hash = cache_hash
         self.schedule = schedule
         self.environment = environment
+        # pipeline_id -> binding of the exact dependency data version this
+        # pipeline is calculated/executed against.
+        self.dependency_bindings = \
+            {} if dependency_bindings is None else dependency_bindings
 
     def __str__(self):
         return 'PipelineSpec({}, validation_errors={}, ' \

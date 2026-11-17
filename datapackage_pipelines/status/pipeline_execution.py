@@ -6,6 +6,8 @@ class PipelineExecution(object):
     def __init__(self, backend, pipeline_id, pipeline_details, cache_hash, trigger, execution_id,
                  log='', queue_time=None, start_time=None, finish_time=None, success=None,
                  stats=None, error_log=None,
+                 output=None, dependency_bindings=None,
+                 pipeline_path=None,
                  save=True):
         self.backend = backend
         self.pipeline_id = pipeline_id
@@ -20,6 +22,14 @@ class PipelineExecution(object):
         self.success = success
         self.stats = stats or {}
         self.error_log = error_log or []
+        # The dependency data versions this execution is bound to, selected
+        # when it started. Enough to replay the run against the same data.
+        self.dependency_bindings = dependency_bindings or {}
+        # Identity of the output this execution published (datapackage url,
+        # content version and immutable snapshot), recorded on success.
+        self.output = output
+        # Directory the pipeline ran in - needed to replay the execution.
+        self.pipeline_path = pipeline_path
         if save:
             self.__save()
 
@@ -40,6 +50,9 @@ class PipelineExecution(object):
             success=data['success'],
             stats=data['stats'],
             error_log=data['error_log'],
+            output=data.get('output'),
+            dependency_bindings=data.get('dependency_bindings'),
+            pipeline_path=data.get('pipeline_path'),
             save=False
         )
 
@@ -56,10 +69,16 @@ class PipelineExecution(object):
         yield 'success', self.success
         yield 'stats', self.stats
         yield 'error_log', self.error_log
+        yield 'dependency_bindings', self.dependency_bindings
+        yield 'output', self.output
+        yield 'pipeline_path', self.pipeline_path
 
     def __save(self):
         # logging.debug('SAVING PipelineExecution %s/%s -> %r' % (self.pipeline_id, self.execution_id, dict(self)))
         self.backend.set_status('PipelineExecution:' + self.execution_id, dict(self))
+
+    def save(self):
+        self.__save()
 
     def queue_execution(self, trigger):
         if self.queue_time is not None:
@@ -69,20 +88,24 @@ class PipelineExecution(object):
         self.__save()
         return True
 
-    def start_execution(self):
+    def start_execution(self, dependency_bindings=None):
         if self.queue_time is None or self.start_time is not None:
             return False
         self.start_time = time.time()
+        if dependency_bindings is not None:
+            self.dependency_bindings = dependency_bindings
         self.__save()
         return True
 
-    def finish_execution(self, success, stats, error_log):
+    def finish_execution(self, success, stats, error_log, output=None):
         if self.queue_time is None or self.start_time is None:
             return False
         self.finish_time = time.time()
         self.success = success
         self.stats = stats
         self.error_log = error_log
+        if output is not None:
+            self.output = output
         self.__save()
         return True
 

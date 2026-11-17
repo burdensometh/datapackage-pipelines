@@ -51,12 +51,15 @@ def collect_dependencies(pipeline_ids):
 def queue_pipeline(ps: PipelineStatus, spec: PipelineSpec, trigger):
     eid = gen_execution_id()
     logging.info('%s QUEUEING %s task %s', eid[:8], trigger.upper(), spec.pipeline_id)
-    if ps.queue_execution(eid, trigger):
+    dependency_bindings = getattr(spec, 'dependency_bindings', None) or {}
+    if ps.queue_execution(eid, trigger, dependency_bindings,
+                          pipeline_path=spec.path):
         execute_pipeline_task.delay(spec.pipeline_id,
                                     spec.pipeline_details,
                                     spec.path,
                                     trigger,
-                                    eid)
+                                    eid,
+                                    dependency_bindings)
         return True
     return False
 
@@ -123,8 +126,11 @@ def update_pipelines(action, completed_pipeline_id, completed_trigger):
                 continue
 
         last_successful = ps.state() == 'SUCCEEDED'
+        # Compare against the hash just calculated from the current code and
+        # dependency data versions (not the one stored by the last scan), so
+        # republished dependency data makes dependents dirty too.
         if ps.runnable() and \
-                (ps.dirty() or
+                (ps.dirty(spec.cache_hash) or
                  completed_trigger or
                  (action == 'init' and not last_successful)):
             queued = queue_pipeline(ps, spec,
@@ -160,16 +166,19 @@ def execute_pipeline_task(pipeline_id,
                           pipeline_details,
                           pipeline_cwd,
                           trigger,
-                          execution_id):
+                          execution_id,
+                          dependency_bindings=None):
 
     spec = PipelineSpec(pipeline_id=pipeline_id,
                         pipeline_details=pipeline_details,
-                        path=pipeline_cwd)
+                        path=pipeline_cwd,
+                        dependency_bindings=dependency_bindings)
     success, _, _ = \
         execute_pipeline(spec,
                          execution_id,
                          trigger,
-                         False)
+                         False,
+                         dependency_bindings)
 
     if success:
         has_dependents = len(get_dep_mgr().get_dependents(spec.pipeline_id)) > 0
