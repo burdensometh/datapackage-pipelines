@@ -771,6 +771,88 @@ Deduplicating rows in the `world-population` resource.
 ```
 
 
+### ***`clean_package`***
+
+Whole-package cleaning that turns a data package containing bad fields,
+duplicate primary keys and dangling references into data that can actually
+be loaded into a relational database.
+
+The processor buffers every selected resource and applies three checks, in
+order:
+
+1. **Schema validation** - each row is cast and checked against the
+   resource's declared [table schema](https://specs.frictionlessdata.io/table-schema/).
+   Rows that fail a type cast or a field-level constraint (e.g. `required`,
+   `enum`, `minimum`) are isolated. Primary key fields must additionally be
+   non-null.
+2. **Primary key uniqueness** - when several rows share the same primary
+   key value, *all* of the conflicting rows are isolated (no duplicate is
+   silently kept).
+3. **Foreign key closure** - every foreign key must resolve to a surviving
+   row of the referenced resource. Rows that reference an isolated or
+   non-existent parent are isolated themselves; the check repeats until no
+   more rows can be removed, so references broken transitively are caught
+   as well. Nullable foreign keys are honoured according to the schema: an
+   entirely null key is allowed on nullable columns, while a partially null
+   composite key is always rejected. Healthy circular reference groups
+   (including self-references) are kept, because every row they reference
+   still exists.
+
+For each selected resource the processor keeps the original resource name
+for the clean stream and adds a sibling **quarantine resource** holding
+every rejected row. A quarantine row contains:
+
+- `original_row` - the row exactly as it arrived
+- `resource` - the resource it came from
+- `source` - the source path of that resource
+- `source_row_index` - the zero-based row index in the source
+- `reason` - one of `schema-violation`, `duplicate-primary-key`,
+  `dangling-foreign-key`
+- `reason_detail` - a human readable explanation
+
+A count of input, valid and quarantined rows (broken down by reason) is
+published under the `clean_package` stats key. Resources not selected by
+the `resources` parameter pass through untouched.
+
+Because the clean streams obey their primary and foreign keys, they can be
+handed straight to an SQL sink without constraint violations (the
+quarantine resources are simply not mapped to tables). Use
+`dump_clean_to_sql` when resources reference each other, or `dump_to_sql`
+for self-contained tables.
+
+_Parameters_:
+
+- `resources` - Optional resource specifier (name, list of names or regex).
+  Defaults to every resource in the package.
+- `quarantine_suffix` - Suffix used to name quarantine siblings. Defaults
+  to `_quarantine` (e.g. `orders` -> `orders_quarantine`). The generated
+  name must not collide with an existing resource.
+
+*Examples*:
+
+Cleaning two related tables and loading only the valid rows into SQL:
+
+```yaml
+- run: clean_package
+- run: dump_clean_to_sql
+  parameters:
+    tables:
+      departments:
+        resource-name: departments
+      employees:
+        resource-name: employees
+```
+
+Cleaning a single resource with a custom quarantine name:
+
+```yaml
+- run: clean_package
+  parameters:
+    resources: orders
+    quarantine_suffix: _rejected
+```
+
+
 ### ***`duplicate`***
 
 Duplicate a resource.
@@ -1095,6 +1177,52 @@ _Parameters_:
   - `true` - row was updated
   - `false` - row was inserted
 - `updated_id_column` - Optional name of a column that will be added to the spewed data and contain the id of the updated row in DB.
+
+### ***`dump_clean_to_sql`***
+
+Loads cleaned data into an SQL database while creating the resources' real
+primary and foreign key constraints, including cross-table references and
+self-references.
+
+The standard `dump_to_sql` processor builds one storage per table using the
+table name as a prefix, which prevents cross-table foreign keys from being
+created (the referenced table names are computed incorrectly). Use
+`dump_clean_to_sql` downstream of `clean_package` when the data package
+contains foreign keys between resources. The processor maps only the clean
+resources to tables - quarantine resources are not listed in `tables` and
+therefore stay in the data stream instead of being written to the database.
+
+Tables are created (or replaced, in rewrite semantics) from the declared
+schemas, with correct nullability, primary keys and foreign keys. On SQLite
+foreign key enforcement is relaxed while the data is loaded - which allows
+healthy circular reference groups to be inserted - and the whole load is
+then verified with `PRAGMA foreign_key_check`; the pipeline fails if any
+violation remains.
+
+_Parameters_:
+
+- `tables` - Mapping between resources and DB tables. Keys are table names,
+  values are objects with a `resource-name` attribute naming the resource to
+  load into the table.
+- `engine` - Connection string for the SQL database (URL syntax). Also
+  supports `env://<environment-variable>`; defaults to
+  `env://DPP_DB_ENGINE`.
+
+*Examples*:
+
+Cleaning two related tables and loading the valid rows with enforced
+constraints:
+
+```yaml
+- run: clean_package
+- run: dump_clean_to_sql
+  parameters:
+    tables:
+      departments:
+        resource-name: departments
+      employees:
+        resource-name: employees
+```
 
 ### ***`dump_to_path`***
 Saves the datapackage to a filesystem path.

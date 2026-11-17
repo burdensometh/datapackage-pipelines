@@ -1,0 +1,156 @@
+clean_package
+--
+{
+    "quarantine_suffix": "_quarantine"
+}
+--
+{
+    "name": "test",
+    "resources": [
+        {
+            "name": "departments",
+            "dpp:streaming": true,
+            "path": "departments.csv",
+            "schema": {
+                "fields": [
+                    {"name": "id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "name", "type": "string"},
+                    {"name": "manager_id", "type": "integer"}
+                ],
+                "primaryKey": ["id"],
+                "foreignKeys": [
+                    {"fields": ["manager_id"],
+                     "reference": {"resource": "", "fields": ["id"]}}
+                ]
+            }
+        },
+        {
+            "name": "employees",
+            "dpp:streaming": true,
+            "path": "employees.csv",
+            "schema": {
+                "fields": [
+                    {"name": "id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "dept_id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "manager_id", "type": "integer"}
+                ],
+                "primaryKey": ["id"],
+                "foreignKeys": [
+                    {"fields": ["dept_id"],
+                     "reference": {"resource": "departments", "fields": ["id"]}},
+                    {"fields": ["manager_id"],
+                     "reference": {"resource": "", "fields": ["id"]}}
+                ]
+            }
+        }
+    ]
+}
+--
+{"id": 1, "name": "Eng", "manager_id": 2}
+{"id": 2, "name": "HR", "manager_id": 1}
+{"id": "oops", "name": "Bad", "manager_id": null}
+{"id": 9, "name": "DupA", "manager_id": null}
+{"id": 9, "name": "DupB", "manager_id": null}
+{"id": 4, "name": "Orphan", "manager_id": 99}
+
+{"id": 10, "dept_id": 1, "manager_id": null}
+{"id": 11, "dept_id": 1, "manager_id": 12}
+{"id": 12, "dept_id": 1, "manager_id": 11}
+{"id": 13, "dept_id": 9, "manager_id": null}
+{"id": 14, "dept_id": 77, "manager_id": null}
+{"id": "x", "dept_id": 1, "manager_id": null}
+--
+{
+    "name": "test",
+    "profile": "data-package",
+    "resources": [
+        {
+            "name": "departments",
+            "dpp:streaming": true,
+            "path": "departments.csv",
+            "profile": "data-resource",
+            "schema": {
+                "fields": [
+                    {"name": "id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "name", "type": "string"},
+                    {"name": "manager_id", "type": "integer"}
+                ],
+                "primaryKey": ["id"],
+                "foreignKeys": [
+                    {"fields": ["manager_id"],
+                     "reference": {"resource": "", "fields": ["id"]}}
+                ]
+            }
+        },
+        {
+            "name": "departments_quarantine",
+            "dpp:streaming": true,
+            "path": "departments_quarantine.csv",
+            "profile": "data-resource",
+            "schema": {
+                "fields": [
+                    {"name": "original_row", "type": "object"},
+                    {"name": "resource", "type": "string"},
+                    {"name": "source", "type": "string"},
+                    {"name": "source_row_index", "type": "integer"},
+                    {"name": "reason", "type": "string"},
+                    {"name": "reason_detail", "type": "string"}
+                ]
+            }
+        },
+        {
+            "name": "employees",
+            "dpp:streaming": true,
+            "path": "employees.csv",
+            "profile": "data-resource",
+            "schema": {
+                "fields": [
+                    {"name": "id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "dept_id", "type": "integer", "constraints": {"required": true}},
+                    {"name": "manager_id", "type": "integer"}
+                ],
+                "primaryKey": ["id"],
+                "foreignKeys": [
+                    {"fields": ["dept_id"],
+                     "reference": {"resource": "departments", "fields": ["id"]}},
+                    {"fields": ["manager_id"],
+                     "reference": {"resource": "", "fields": ["id"]}}
+                ]
+            }
+        },
+        {
+            "name": "employees_quarantine",
+            "dpp:streaming": true,
+            "path": "employees_quarantine.csv",
+            "profile": "data-resource",
+            "schema": {
+                "fields": [
+                    {"name": "original_row", "type": "object"},
+                    {"name": "resource", "type": "string"},
+                    {"name": "source", "type": "string"},
+                    {"name": "source_row_index", "type": "integer"},
+                    {"name": "reason", "type": "string"},
+                    {"name": "reason_detail", "type": "string"}
+                ]
+            }
+        }
+    ]
+}
+--
+{"id": 1, "name": "Eng", "manager_id": 2}
+{"id": 2, "name": "HR", "manager_id": 1}
+
+{"original_row": {"id": "oops", "name": "Bad", "manager_id": null}, "resource": "departments", "source": "departments.csv", "source_row_index": 2, "reason": "schema-violation", "reason_detail": "Field \"id\" can't cast value \"oops\" for type \"integer\" with format \"default\""}
+{"original_row": {"id": 9, "name": "DupA", "manager_id": null}, "resource": "departments", "source": "departments.csv", "source_row_index": 3, "reason": "duplicate-primary-key", "reason_detail": "Duplicate primary key ['id']=[9]"}
+{"original_row": {"id": 9, "name": "DupB", "manager_id": null}, "resource": "departments", "source": "departments.csv", "source_row_index": 4, "reason": "duplicate-primary-key", "reason_detail": "Duplicate primary key ['id']=[9]"}
+{"original_row": {"id": 4, "name": "Orphan", "manager_id": 99}, "resource": "departments", "source": "departments.csv", "source_row_index": 5, "reason": "dangling-foreign-key", "reason_detail": "Foreign key ['manager_id']=[99] references missing departments.['id'] (nullable local fields: ['manager_id'])"}
+
+{"id": 10, "dept_id": 1, "manager_id": null}
+{"id": 11, "dept_id": 1, "manager_id": 12}
+{"id": 12, "dept_id": 1, "manager_id": 11}
+
+{"original_row": {"id": "x", "dept_id": 1, "manager_id": null}, "resource": "employees", "source": "employees.csv", "source_row_index": 5, "reason": "schema-violation", "reason_detail": "Field \"id\" can't cast value \"x\" for type \"integer\" with format \"default\""}
+{"original_row": {"id": 13, "dept_id": 9, "manager_id": null}, "resource": "employees", "source": "employees.csv", "source_row_index": 3, "reason": "dangling-foreign-key", "reason_detail": "Foreign key ['dept_id']=[9] references missing departments.['id'] (nullable local fields: [])"}
+{"original_row": {"id": 14, "dept_id": 77, "manager_id": null}, "resource": "employees", "source": "employees.csv", "source_row_index": 4, "reason": "dangling-foreign-key", "reason_detail": "Foreign key ['dept_id']=[77] references missing departments.['id'] (nullable local fields: [])"}
+
+{"clean_package": {"input_counts": {"departments": 6, "employees": 6}, "valid_counts": {"departments": 2, "employees": 3}, "quarantine_counts": {"departments": 4, "employees": 3}, "reason_counts": {"schema-violation": {"departments": 1, "employees": 1}, "duplicate-primary-key": {"departments": 2}, "dangling-foreign-key": {"departments": 1, "employees": 2}}}}
