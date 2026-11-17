@@ -125,7 +125,15 @@ def resolve_generator(module_name):
     resolved_generators[module_name] = None
     module = load_module(module_name)
     if module is None:
-        return None
+        # Generators which are provided by datapackage-pipelines itself
+        # (e.g. `partitions.source-spec.yaml`) don't need an external plugin.
+        try:
+            module = import_module(
+                'datapackage_pipelines.generators.' + module_name)
+        except ModuleNotFoundError as e:
+            if e.name != 'datapackage_pipelines.generators.' + module_name:
+                raise
+            return None
     try:
         generator_class = module.Generator
     except AttributeError:

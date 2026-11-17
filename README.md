@@ -1655,6 +1655,73 @@ Source descriptors can have any structure that best matches the parameter domain
 
 `dpp` will ensure that source descriptor files conform to that schema before attempting to convert them into pipelines using the `Generator` class.
 
+#### Built-in generator: incremental partitions
+
+A common case is a daily listing of data files ("partitions") which are added, replaced and removed over time. `datapackage-pipelines` ships with a `partitions` generator for that case, so no plugin is needed: create a `partitions.source-spec.yaml` file (conventionally named `partitions.source-spec.yaml`, but any filename of the form `<name>.source-spec.yaml` works as long as a `Generator` is provided for it).
+
+```yaml
+name: daily-parts            # the published package (and resource) name
+title: Daily parts
+schema:                      # the unified schema of the published package
+  fields:
+    - {name: id,   type: integer}
+    - {name: name, type: string}
+clean:                       # applied to every partition, in order
+  - run: set_types
+    parameters:
+      types:
+        id: {type: integer}
+partitions:                  # the manifest
+  - key: 2019-01-01
+    path: data/2019-01-01.csv
+    digest: 'sha256:8c1d...'
+  - key: 2019-01-02
+    path: data/2019-01-02.csv
+    digest: 'sha256:5a2f...'
+    steps:                   # optional, extra per-partition steps
+      - run: deduplicate
+out-path: published          # the published package's directory
+```
+
+Each partition must have:
+
+- `key` - its unique identity in the manifest (duplicate keys are rejected)
+- `path` (or `url` / `from`) - where its data is read from
+- `digest` (or `checksum` / `hash`) - a summary of its content
+
+The generator produces **one independent pipeline per partition** plus **one merge pipeline** (both as regular pipelines, so they can be run and inspected with `dpp`):
+
+```
+./daily-parts/partition/2019-01-01
+./daily-parts/partition/2019-01-02
+./daily-parts/merge              # depends on all partition pipelines of this round
+```
+
+Each partition pipeline loads its partition, applies the cleaning steps, enforces the unified schema and writes a qualified per-partition data package to a **digest-addressed** directory (`published.partitions/<key>/<digest>/`). The step which produces this output is cached, so:
+
+- **unchanged partitions are reused** - if the key, path and digest are all the same, the previous qualified output is used instead of cleaning the data again;
+- **a changed digest is really recomputed** - the digest is part of the cached step's cache hash, and the output directory is digest-addressed, so a new digest can never read (or overwrite) an old output;
+- **a failed partition leaves no reusable output behind** - the cache file is only completed after the step finished successfully.
+
+The merge pipeline takes **only the partitions confirmed in the current manifest**. It verifies each partition output's own `partition` marker (key and digest) against the manifest, then merges the rows into the unified schema and publishes the result with `publish_datapackage`:
+
+- **removed partitions cannot come back** - their rows were never read, since the merge never looks at what happens to exist on disk;
+- **a partition that failed, is missing, or was computed for a different digest aborts the merge** - and since the merge step is a dependency of nothing less than the publish step, no half-new data package is published;
+- **publishing is atomic** - the package is first dumped into a temporary directory and only swapped into `out-path` after the dump fully completed, so an earlier published package survives any failure;
+- **an empty manifest is well-defined** - the merge pipeline is still generated, and publishes a package with an empty `partition-manifest` and (if a unified schema was declared) a single empty resource with the unified schema.
+
+The published data package records the exact partition versions it was built from:
+
+```json
+"partition-manifest": {
+  "partitions": [
+    {"key": "2019-01-01", "digest": "sha256:8c1d...", "path": "data/2019-01-01.csv", "count_of_rows": 120}
+  ]
+}
+```
+
+Additional source-spec options: `resource-name` (defaults to the slugified `name`), `load-options` / `dump-options` (passed to the `load` / `dump_to_path` steps), `work-dir` (where per-partition outputs are kept, defaults to `<out-path>.partitions`), `merge.steps` / `merge.out-path` / `merge.options` (extra merge steps and merge output configuration) and `schedule` (attached to the merge pipeline). Per-partition `format`, `encoding`, `compression`, `headers` and `sheet` are forwarded to `load`; `options` and `load` are merged into its parameters as well.
+
 #### Providing Processor Code
 
 In some cases, a generator would prefer to provide the processor code as well (alongside the pipeline definition).
